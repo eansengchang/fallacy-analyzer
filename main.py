@@ -48,7 +48,7 @@ async def on_message(message):
         return
 
     # Check if the message starts with the e analyse command
-    if message.content.startswith('e analyse'):
+    if message.content.lower().startswith('e analyse'):
         argument_text = ""
         author_of_argument = None
 
@@ -125,7 +125,7 @@ async def on_message(message):
             await message.channel.send(embed=error_embed)
 
     # NEW: Check if the message starts with the e grammar command
-    elif message.content.startswith('e grammar'):
+    elif message.content.lower().startswith('e grammar'):
         text_to_check = ""
         author_of_text = None
 
