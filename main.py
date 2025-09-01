@@ -1,4 +1,3 @@
-# main.py
 import discord
 import os
 import requests
@@ -36,6 +35,7 @@ async def on_ready():
     print('Bot is ready to analyse arguments and grammar!')
     print('Reply to a message with e analyse or use e analyse <your argument>.')
     print('Reply to a message with e grammar or use e grammar <your text>.')
+    print('Reply to a message with e tldr to summarise the conversation since that message.')
     print('-------------------------------------------------')
 
 @client.event
@@ -108,6 +108,11 @@ async def on_message(message):
                         f"**Explanation:** {fallacy.get('explanation', 'No explanation provided.')}\n"
                         f"**Quote:** *\"{fallacy.get('quote', 'N/A')}\"*"
                     )
+
+                    # MODIFIED: Truncate the field value if it exceeds Discord's limit of 1024 characters.
+                    if len(field_value) > 1024:
+                        field_value = field_value[:1021] + "..."
+
                     embed.add_field(name=field_name, value=field_value, inline=False)
 
                 # Reply to the original command message with the results
@@ -124,7 +129,7 @@ async def on_message(message):
             )
             await message.channel.send(embed=error_embed)
 
-    # NEW: Check if the message starts with the e grammar command
+    # Check if the message starts with the e grammar command
     elif message.content.lower().startswith('e grammar'):
         text_to_check = ""
         author_of_text = None
@@ -186,6 +191,11 @@ async def on_message(message):
                         f"**Correction:** `{error.get('correction', 'N/A')}`\n"
                         f"**Original:** *\"{error.get('quote', 'N/A')}\"*"
                     )
+                    
+                    # MODIFIED: Truncate the field value if it exceeds Discord's limit of 1024 characters.
+                    if len(field_value) > 1024:
+                        field_value = field_value[:1021] + "..."
+
                     embed.add_field(name=field_name, value=field_value, inline=False)
 
                 # Reply to the original command message with the results
@@ -198,6 +208,68 @@ async def on_message(message):
             error_embed = discord.Embed(
                 title="Grammar Check Failed",
                 description="Sorry, something went wrong while trying to check the grammar. Please try again later.",
+                color=discord.Color.red()
+            )
+            await message.channel.send(embed=error_embed)
+
+    # Handle 'e tldr' command
+    elif message.content.lower() == 'e tldr':
+        # This command must be a reply to a message
+        if not message.reference or not message.reference.message_id:
+            await message.channel.send("You must reply to the starting message of the conversation you want to summarize with `e tldr`.")
+            return
+
+        processing_message = await message.channel.send("📚 Summarizing the conversation...")
+
+        try:
+            # Fetch the starting message
+            start_message = await message.channel.fetch_message(message.reference.message_id)
+
+            # Fetch all messages between the start message and the command message
+            messages_to_summarize = [start_message]
+            # We use history to get messages after the starting one, up until the current one.
+            async for msg in message.channel.history(after=start_message, before=message):
+                messages_to_summarize.append(msg)
+            
+            # Format the conversation for the API
+            conversation_text = "\n".join(
+                f"{msg.author.display_name}: {msg.content}" for msg in messages_to_summarize
+            )
+
+            if not conversation_text:
+                 await processing_message.edit(content="There's nothing to summarize!")
+                 return
+
+            # Get the summary from the API
+            summary = await get_summary(conversation_text)
+
+            await processing_message.delete()
+
+            # MODIFIED: Truncate the summary if it exceeds Discord's description limit of 4096 characters.
+            if len(summary) > 4096:
+                summary = summary[:4093] + "..."
+
+            # Create and send the embed with the summary
+            embed = discord.Embed(
+                title="Conversation Summary (TL;DR)",
+                description=summary,
+                color=discord.Color.purple()
+            )
+            embed.set_footer(text=f"Summary of conversation since {start_message.author.display_name}'s message.")
+            await message.reply(embed=embed, mention_author=False)
+
+        except discord.NotFound:
+            await processing_message.delete()
+            await message.channel.send("I couldn't find the starting message you replied to.")
+        except discord.Forbidden:
+            await processing_message.delete()
+            await message.channel.send("I don't have permission to read the message history here.")
+        except Exception as e:
+            print(f"An error occurred during summarization: {e}")
+            await processing_message.delete()
+            error_embed = discord.Embed(
+                title="Summarization Failed",
+                description="Sorry, something went wrong. Please try again later.",
                 color=discord.Color.red()
             )
             await message.channel.send(embed=error_embed)
@@ -254,7 +326,6 @@ async def get_fallacies(text_to_analyse: str) -> list:
         raise Exception(f"API request failed with status {response.status_code}: {response.text}")
 
 
-# NEW: Function to get grammar errors from Gemini API
 async def get_grammar_errors(text_to_analyse: str) -> list:
     """
     Sends the text to the Gemini API to detect grammatical errors.
@@ -306,6 +377,38 @@ async def get_grammar_errors(text_to_analyse: str) -> list:
                 return []
         except (KeyError, IndexError):
             return [] # Return empty list if the expected structure is not present
+    else:
+        raise Exception(f"API request failed with status {response.status_code}: {response.text}")
+
+
+async def get_summary(conversation_text: str) -> str:
+    """
+    Sends a conversation to the Gemini API and asks for a summary.
+    """
+    prompt = f"""
+    Please provide a concise summary of the following conversation. 
+    Capture the main points, key arguments, and the overall conclusion or outcome if one exists.
+    
+    Conversation to summarize:
+    ---
+    {conversation_text}
+    ---
+    """
+
+    # The payload for a simple text response
+    payload = {
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}]
+    }
+
+    headers = {'Content-Type': 'application/json'}
+    response = requests.post(GEMINI_API_URL, headers=headers, data=json.dumps(payload))
+
+    if response.status_code == 200:
+        result = response.json()
+        try:
+            return result['candidates'][0]['content']['parts'][0]['text']
+        except (KeyError, IndexError):
+            return "Could not parse the summary from the API response."
     else:
         raise Exception(f"API request failed with status {response.status_code}: {response.text}")
 
