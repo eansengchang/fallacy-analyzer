@@ -261,7 +261,7 @@ async def on_message(message):
             messages_to_summarize = [start_message]
             # We use history to get messages after the starting one, up until the current one.
             async for msg in message.channel.history(
-                after=start_message, before=message
+                after=start_message, before=message, limit=200
             ):
                 messages_to_summarize.append(msg)
 
