@@ -35,6 +35,7 @@ EMBED_COLOR_ERROR = discord.Color.red()
 EMBED_COLOR_ANALYSE = discord.Color.orange()
 EMBED_COLOR_GRAMMAR = discord.Color.blue()
 EMBED_COLOR_SUMMARY = discord.Color.purple()
+EMBED_COLOR_OPINION = discord.Color.teal() # New color for the opinion command
 
 
 # --- Bot Definition ---
@@ -164,6 +165,27 @@ class GeminiAPI:
         Provide a concise summary of the following conversation.
         Capture the main points, key arguments, and the overall outcome if one exists.
         Conversation:
+        ---
+        {text}
+        ---
+        """
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        response_json = await self._make_request(payload)
+        return self._parse_response(response_json)
+
+    async def get_opinion(self, text: str) -> Optional[str]:
+        """Gets a neutral third-party opinion on a conversation."""
+        prompt = f"""
+        Act as a neutral and impartial third-party observer. Provide a balanced opinion on the following conversation.
+        Your goal is to offer perspective, not to take sides or declare a "winner".
+        Your opinion should:
+        1.  Briefly summarize the core topic of the discussion.
+        2.  Identify the main points of disagreement between the participants.
+        3.  Acknowledge any valid points or common ground, if they exist.
+        4.  Suggest potential areas for compromise or further constructive discussion.
+        5.  Maintain a neutral, objective, and respectful tone throughout.
+
+        Conversation to provide an opinion on:
         ---
         {text}
         ---
@@ -355,6 +377,61 @@ class AnalysisCog(commands.Cog):
         )
         embed.set_footer(
             text=f"Summary of conversation since {start_message.author.display_name}'s message."
+        )
+        await ctx.reply(embed=embed, mention_author=False)
+
+    @commands.command(
+        name="opinion", help="Gives a neutral third-party opinion on a conversation."
+    )
+    async def opinion(self, ctx: commands.Context):
+        """
+        Gives a neutral opinion on a conversation.
+        Usage: Reply to the starting message of a conversation with 'e opinion'.
+        """
+        if not ctx.message.reference or not ctx.message.reference.message_id:
+            raise commands.UserInputError(
+                "You must reply to the starting message to get an opinion on a conversation."
+            )
+
+        try:
+            start_message = await ctx.channel.fetch_message(
+                ctx.message.reference.message_id
+            )
+        except (discord.NotFound, discord.Forbidden):
+            raise commands.CommandError(
+                "Could not find or access the starting message."
+            )
+
+        async with ctx.typing():
+            # Fetch up to 100 messages after the replied-to message for context
+            history = [
+                msg async for msg in ctx.channel.history(after=start_message, limit=100)
+            ]
+            # Combine the starting message with the rest of the history
+            messages_to_analyse = [start_message] + history
+
+            conversation_text = "\n".join(
+                f"{msg.author.display_name}: {msg.content}"
+                for msg in messages_to_analyse
+                if msg.content
+            )
+
+            if not conversation_text:
+                await ctx.send("There's nothing to give an opinion on!")
+                return
+
+            opinion_text = await self.api.get_opinion(conversation_text)
+
+        if not opinion_text:
+            raise commands.CommandError("Failed to generate an opinion.")
+
+        embed = discord.Embed(
+            title="A Neutral Opinion",
+            description=self.truncate_text(opinion_text, 4096),
+            color=EMBED_COLOR_OPINION,
+        )
+        embed.set_footer(
+            text=f"Opinion on the conversation since {start_message.author.display_name}'s message."
         )
         await ctx.reply(embed=embed, mention_author=False)
 
