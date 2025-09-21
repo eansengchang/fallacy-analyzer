@@ -351,7 +351,7 @@ class AnalysisCog(commands.Cog):
 
         async with ctx.typing():
             history = [
-                msg async for msg in ctx.channel.history(after=start_message, limit=200)
+                msg async for msg in ctx.channel.history(after=start_message, limit=500)
             ]
             messages_to_summarize = [start_message] + history
 
@@ -405,7 +405,7 @@ class AnalysisCog(commands.Cog):
         async with ctx.typing():
             # Fetch up to 100 messages after the replied-to message for context
             history = [
-                msg async for msg in ctx.channel.history(after=start_message, limit=100)
+                msg async for msg in ctx.channel.history(after=start_message, limit=500)
             ]
             # Combine the starting message with the rest of the history
             messages_to_analyse = [start_message] + history
