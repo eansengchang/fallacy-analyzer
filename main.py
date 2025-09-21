@@ -35,7 +35,7 @@ EMBED_COLOR_ERROR = discord.Color.red()
 EMBED_COLOR_ANALYSE = discord.Color.orange()
 EMBED_COLOR_GRAMMAR = discord.Color.blue()
 EMBED_COLOR_SUMMARY = discord.Color.purple()
-EMBED_COLOR_OPINION = discord.Color.teal() # New color for the opinion command
+EMBED_COLOR_SOLUTION = discord.Color.teal() # New color for the solution command
 
 
 # --- Bot Definition ---
@@ -173,19 +173,22 @@ class GeminiAPI:
         response_json = await self._make_request(payload)
         return self._parse_response(response_json)
 
-    async def get_opinion(self, text: str) -> Optional[str]:
-        """Gets a neutral third-party opinion on a conversation."""
+    async def get_solution(self, text: str) -> Optional[str]:
+        """Gets solution on a conversation."""
         prompt = f"""
-        Act as a neutral and impartial third-party observer. Provide a balanced opinion on the following conversation.
-        Your goal is to offer perspective, not to take sides or declare a "winner".
-        Your opinion should:
-        1.  Briefly summarize the core topic of the discussion.
-        2.  Identify the main points of disagreement between the participants.
-        3.  Acknowledge any valid points or common ground, if they exist.
-        4.  Suggest potential areas for compromise or further constructive discussion.
-        5.  Maintain a neutral, objective, and respectful tone throughout.
+        Act as a neutral, impartial, and constructive third-party observer. Your goal is to provide a clear path forward for the participants in the following conversation.
 
-        Conversation to provide an opinion on:
+        Analyze the conversation to identify either a central argument or a problem being discussed, and then offer a concise practical solution.
+
+        Your response should be structured as follows:
+        1.  Briefly state the main topic, whether it's a disagreement or a personal challenge.
+        2.  If it's an argument, outline the main perspectives and points of friction.
+            If it's a problem, identify the primary obstacles and goals.
+        3.  Suggest specific, actionable steps that can lead to a resolution. This could be a compromise, a new approach to the problem, or a way to facilitate a more productive discussion.
+
+        Your tone should be helpful and unbiased, focusing entirely on a positive and practical outcome. Be concise with this solution and don't make it too long
+
+        Conversation to analyze:
         ---
         {text}
         ---
@@ -381,16 +384,16 @@ class AnalysisCog(commands.Cog):
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(
-        name="opinion", help="Gives a neutral third-party opinion on a conversation."
+        name="solution", help="Gives a neutral solution on a conversation."
     )
-    async def opinion(self, ctx: commands.Context):
+    async def solution(self, ctx: commands.Context):
         """
-        Gives a neutral opinion on a conversation.
-        Usage: Reply to the starting message of a conversation with 'e opinion'.
+        Gives a solution on a conversation.
+        Usage: Reply to the starting message of a conversation with 'e solution'.
         """
         if not ctx.message.reference or not ctx.message.reference.message_id:
             raise commands.UserInputError(
-                "You must reply to the starting message to get an opinion on a conversation."
+                "You must reply to the starting message to get an solution on a conversation."
             )
 
         try:
@@ -417,21 +420,21 @@ class AnalysisCog(commands.Cog):
             )
 
             if not conversation_text:
-                await ctx.send("There's nothing to give an opinion on!")
+                await ctx.send("There's nothing to give an solution on!")
                 return
 
-            opinion_text = await self.api.get_opinion(conversation_text)
+            solution_text = await self.api.get_solution(conversation_text)
 
-        if not opinion_text:
-            raise commands.CommandError("Failed to generate an opinion.")
+        if not solution_text:
+            raise commands.CommandError("Failed to generate an solution.")
 
         embed = discord.Embed(
-            title="A Neutral Opinion",
-            description=self.truncate_text(opinion_text, 4096),
-            color=EMBED_COLOR_OPINION,
+            title="A Solution",
+            description=self.truncate_text(solution_text, 4096),
+            color=EMBED_COLOR_SOLUTION,
         )
         embed.set_footer(
-            text=f"Opinion on the conversation since {start_message.author.display_name}'s message."
+            text=f"Solution on the conversation since {start_message.author.display_name}'s message."
         )
         await ctx.reply(embed=embed, mention_author=False)
 
