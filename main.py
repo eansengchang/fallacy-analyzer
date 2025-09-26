@@ -29,7 +29,7 @@ if not DISCORD_TOKEN or not GEMINI_KEY:
 
 # Define constants
 PREFIX = "e "
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key={GEMINI_KEY}"
+GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_KEY}"
 EMBED_COLOR_SUCCESS = discord.Color.green()
 EMBED_COLOR_ERROR = discord.Color.red()
 EMBED_COLOR_ANALYSE = discord.Color.orange()
