@@ -1,282 +1,309 @@
-import discord
-from discord.ext import commands
-import os
-import aiohttp
+# main.py
+import asyncio
 import json
 import logging
+import os
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple, Union
+
+import aiohttp
+import discord
+from discord.ext import commands
 from dotenv import load_dotenv
-from typing import Optional, Union
 
-# --- Configuration and Setup ---
+# --- Configuration ---
 
-# Load environment variables from a .env file
 load_dotenv()
-
-# Configure basic logging
 logging.basicConfig(
     level=logging.INFO, format="%(asctime)s:%(levelname)s:%(name)s: %(message)s"
 )
 
-# It's highly recommended to use environment variables for your tokens
-DISCORD_TOKEN = os.getenv("DISCORD_TOKEN")
-GEMINI_KEY = os.getenv("GEMINI_KEY")
 
-if not DISCORD_TOKEN or not GEMINI_KEY:
-    logging.critical(
-        "CRITICAL: DISCORD_TOKEN or GEMINI_KEY not found in environment variables."
+@dataclass
+class Config:
+    """Centralized configuration for the bot."""
+
+    # Secrets
+    DISCORD_TOKEN: str = os.getenv("DISCORD_TOKEN")
+    GEMINI_KEY: str = os.getenv("GEMINI_KEY")
+
+    # Bot Settings
+    PREFIX = ["e ", "E "]
+
+    # API Settings
+    GEMINI_API_URL: str = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
+
+    # Embed Colors
+    EMBED_COLORS: Dict[str, discord.Color] = field(
+        default_factory=lambda: {
+            "success": discord.Color.green(),
+            "error": discord.Color.red(),
+            "analyse": discord.Color.orange(),
+            "grammar": discord.Color.blue(),
+            "summary": discord.Color.purple(),
+            "solution": discord.Color.teal(),
+        }
     )
+
+
+# Instantiate and validate config
+config = Config()
+if not config.DISCORD_TOKEN or not config.GEMINI_KEY:
+    logging.critical("CRITICAL: DISCORD_TOKEN or GEMINI_KEY not found.")
     exit("Exiting: Missing required environment variables.")
 
-# Define constants
-PREFIX = "e "
-GEMINI_API_URL = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent?key={GEMINI_KEY}"
-EMBED_COLOR_SUCCESS = discord.Color.green()
-EMBED_COLOR_ERROR = discord.Color.red()
-EMBED_COLOR_ANALYSE = discord.Color.orange()
-EMBED_COLOR_GRAMMAR = discord.Color.blue()
-EMBED_COLOR_SUMMARY = discord.Color.purple()
-EMBED_COLOR_SOLUTION = discord.Color.teal() # New color for the solution command
+
+# --- API Client ---
 
 
-# --- Bot Definition ---
+class APIError(Exception):
+    """Base exception for API-related errors."""
 
-# Define the bot's intents. We need message_content to read the user's arguments.
-intents = discord.Intents.default()
-intents.messages = True
-intents.message_content = True
-
-bot = commands.Bot(command_prefix=PREFIX, intents=intents, help_command=None)
+    pass
 
 
-# --- API Interaction Logic ---
+class APIRequestError(APIError):
+    """Exception for failed API requests."""
+
+    def __init__(self, status: int, text: str):
+        super().__init__(f"API request failed with status {status}: {text}")
 
 
-class GeminiAPI:
+class APIParseError(APIError):
+    """Exception for errors parsing the API response."""
+
+    def __init__(self, message: str, response: Dict[str, Any]):
+        super().__init__(f"{message}\nResponse: {response}")
+
+
+class GeminiAPIClient:
     """Handles all interactions with the Google Gemini API."""
 
-    @staticmethod
-    async def _make_request(payload: dict) -> dict:
-        """Makes an asynchronous POST request to the Gemini API."""
-        headers = {"Content-Type": "application/json"}
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                GEMINI_API_URL, headers=headers, json=payload
-            ) as response:
-                if response.status == 200:
-                    return await response.json()
-                else:
-                    text = await response.text()
-                    logging.error(
-                        f"API request failed with status {response.status}: {text}"
-                    )
-                    raise commands.CommandError(
-                        "The API request failed. Please check the logs."
-                    )
+    def __init__(self, api_url: str):
+        self.api_url = api_url
+        self.session = aiohttp.ClientSession(
+            headers={"Content-Type": "application/json"}
+        )
 
-    @staticmethod
-    def _parse_response(result: dict, data_key: str = "text") -> Union[list, str, None]:
-        """Safely parses the JSON response from the Gemini API."""
+    async def close(self):
+        """Closes the aiohttp session."""
+        await self.session.close()
+
+    async def _generate_content(
+        self, prompt: str, schema: Optional[Dict] = None
+    ) -> Union[list, str, None]:
+        """Generic method to make a request to the Gemini API."""
+        payload = {"contents": [{"parts": [{"text": prompt}]}]}
+        if schema:
+            payload["generationConfig"] = {
+                "responseMimeType": "application/json",
+                "responseSchema": schema,
+            }
+
+        async with self.session.post(self.api_url, json=payload) as response:
+            if not response.ok:
+                raise APIRequestError(response.status, await response.text())
+            response_json = await response.json()
+
         try:
-            part = result["candidates"][0]["content"]["parts"][0]
-            if data_key in part:
-                # If expecting a JSON string, load it
-                if isinstance(part[data_key], str) and part[
-                    data_key
-                ].strip().startswith(("[", "{")):
-                    return json.loads(part[data_key])
-                return part[data_key]
-            return None
+            part = response_json["candidates"][0]["content"]["parts"][0]
+            # If the response should be JSON, load it from the text field
+            if schema and "text" in part:
+                # The API returns a JSON string inside the 'text' field when a schema is used
+                return json.loads(part["text"])
+            # Otherwise, return the text directly
+            return part.get("text")
         except (KeyError, IndexError, json.JSONDecodeError) as e:
-            logging.error(f"Failed to parse API response: {e}\nResponse: {result}")
-            return None
+            raise APIParseError(f"Failed to parse API response: {e}", response_json)
 
-    async def get_fallacies(self, text: str) -> Optional[list]:
-        """Gets logical fallacies from a given text."""
-        prompt = f"""
-        Analyse the following text for logical fallacies. For each fallacy you find, provide:
-        1. The name of the fallacy.
-        2. A brief explanation of why it is that fallacy in the context of the text.
-        3. The specific quote from the text that contains the fallacy.
-        If no fallacies are found, return an empty array. 
-        Text to analyse: "{text}"
-        """
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "fallacy_name": {"type": "STRING"},
-                            "explanation": {"type": "STRING"},
-                            "quote": {"type": "STRING"},
-                        },
-                        "required": ["fallacy_name", "explanation", "quote"],
-                    },
+    async def get_fallacies(self, text: str) -> Optional[List[Dict]]:
+        """Identifies logical fallacies in text."""
+        prompt = f"""Analyse the following text for logical fallacies. For each fallacy found, provide its name, an explanation, and the specific quote. If none are found, return an empty array. Text: "{text}" """
+        schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "fallacy_name": {"type": "STRING"},
+                    "explanation": {"type": "STRING"},
+                    "quote": {"type": "STRING"},
                 },
+                "required": ["fallacy_name", "explanation", "quote"],
             },
         }
-        response_json = await self._make_request(payload)
-        return self._parse_response(response_json)
+        return await self._generate_content(prompt, schema)
 
-    async def get_grammar_errors(self, text: str) -> Optional[list]:
-        """Gets grammatical errors from a given text."""
-        prompt = f"""
-        Analyse the following text for grammatical errors. For each error you find, provide:
-        1. The type of error (e.g., "Spelling", "Punctuation").
-        2. A brief explanation of the mistake.
-        3. The suggested correction.
-        4. The specific quote from the text that contains the error.
-        If there are no errors, return an empty array.
-        Text to analyse: "{text}"
-        """
-        payload = {
-            "contents": [{"parts": [{"text": prompt}]}],
-            "generationConfig": {
-                "responseMimeType": "application/json",
-                "responseSchema": {
-                    "type": "ARRAY",
-                    "items": {
-                        "type": "OBJECT",
-                        "properties": {
-                            "error_type": {"type": "STRING"},
-                            "explanation": {"type": "STRING"},
-                            "correction": {"type": "STRING"},
-                            "quote": {"type": "STRING"},
-                        },
-                        "required": [
-                            "error_type",
-                            "explanation",
-                            "correction",
-                            "quote",
-                        ],
-                    },
+    async def get_grammar_errors(self, text: str) -> Optional[List[Dict]]:
+        """Identifies grammatical errors in text."""
+        prompt = f"""Analyse the text for grammatical errors. For each error, provide its type, an explanation, the suggested correction, and the quote. If none, return an empty array. Text: "{text}" """
+        schema = {
+            "type": "ARRAY",
+            "items": {
+                "type": "OBJECT",
+                "properties": {
+                    "error_type": {"type": "STRING"},
+                    "explanation": {"type": "STRING"},
+                    "correction": {"type": "STRING"},
+                    "quote": {"type": "STRING"},
                 },
+                "required": ["error_type", "explanation", "correction", "quote"],
             },
         }
-        response_json = await self._make_request(payload)
-        return self._parse_response(response_json)
+        return await self._generate_content(prompt, schema)
 
     async def get_summary(self, text: str) -> Optional[str]:
-        """Gets a summary for a given text."""
-        prompt = f"""
-        Provide a concise summary of the following conversation.
-        Capture the main points, key arguments, and the overall outcome if one exists.
-        Conversation:
-        ---
-        {text}
-        ---
-        """
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        response_json = await self._make_request(payload)
-        return self._parse_response(response_json)
+        """Generates a concise summary of a conversation."""
+        prompt = f"Provide a concise summary of the following conversation, capturing the main points and arguments:\n---\n{text}\n---"
+        return await self._generate_content(prompt)
 
     async def get_solution(self, text: str) -> Optional[str]:
-        """Gets solution on a conversation."""
-        prompt = f"""
-        Act as a neutral, impartial, and constructive third-party observer. Your goal is to provide a clear path forward for the participants in the following conversation.
-
-        Analyze the conversation to identify either a central argument or a problem being discussed, and then offer a concise practical solution.
-
-        Your response should be structured as follows:
-        1.  Briefly state the main topic, whether it's a disagreement or a personal challenge.
-        2.  If it's an argument, outline the main perspectives and points of friction.
-            If it's a problem, identify the primary obstacles and goals.
-        3.  Suggest specific, actionable steps that can lead to a resolution. This could be a compromise, a new approach to the problem, or a way to facilitate a more productive discussion.
-
-        Your tone should be helpful and unbiased, focusing entirely on a positive and practical outcome. Be concise with this solution and don't make it too long
-
-        Conversation to analyze:
-        ---
-        {text}
-        ---
-        """
-        payload = {"contents": [{"parts": [{"text": prompt}]}]}
-        response_json = await self._make_request(payload)
-        return self._parse_response(response_json)
+        """Proposes a neutral, actionable solution for a discussion."""
+        prompt = f"""Act as a neutral third-party observer. Analyse the conversation, identify the core issue (argument or problem), and propose a concise, practical, and actionable solution. Your tone should be constructive and unbiased. Conversation:\n---\n{text}\n---"""
+        return await self._generate_content(prompt)
 
 
-# --- Bot Cogs (Commands and Events) ---
+# --- Bot Cog ---
 
 
 class AnalysisCog(commands.Cog):
-    def __init__(self, bot: commands.Bot):
+    """Cog for text analysis commands."""
+
+    def __init__(self, bot: commands.Bot, api_client: GeminiAPIClient):
         self.bot = bot
-        self.api = GeminiAPI()
+        self.api_client = api_client
+
+    # --- Helper Methods ---
 
     @staticmethod
-    def truncate_text(text: str, max_length: int) -> str:
-        """Truncates text to a specified max length, adding an ellipsis if needed."""
-        return text if len(text) <= max_length else text[: max_length - 3] + "..."
+    def _truncate(text: str, max_len: int) -> str:
+        """Truncates text to a max length, adding an ellipsis if needed."""
+        return text if len(text) <= max_len else text[: max_len - 3] + "..."
 
-    async def _get_target_text_and_author(
-        self, ctx: commands.Context, text_argument: Optional[str]
-    ) -> tuple:
-        """Helper to get text and author from a reply or command argument."""
+    @staticmethod
+    def _create_embed(
+        title: str, color: discord.Color, description: str = "", footer: str = ""
+    ) -> discord.Embed:
+        """Creates a standardized Discord embed."""
+        embed = discord.Embed(title=title, description=description, color=color)
+        if footer:
+            embed.set_footer(text=footer)
+        return embed
+
+    async def _get_target_from_context(
+        self, ctx: commands.Context, text_arg: Optional[str]
+    ) -> Tuple[str, discord.Member]:
+        """Gets the target text and author from context (reply or argument)."""
         if ctx.message.reference and ctx.message.reference.message_id:
             try:
-                replied_message = await ctx.channel.fetch_message(
-                    ctx.message.reference.message_id
-                )
-                return replied_message.content, replied_message.author
-            except (discord.NotFound, discord.Forbidden) as e:
-                raise commands.CommandError(f"Could not fetch the replied message: {e}")
-        elif text_argument:
-            return text_argument, ctx.author
-        else:
-            return None, None
+                msg = await ctx.channel.fetch_message(ctx.message.reference.message_id)
+                return msg.content, msg.author
+            except (discord.NotFound, discord.Forbidden):
+                raise commands.CommandError("Could not fetch the replied message.")
+        if text_arg:
+            return text_arg, ctx.author
+        raise commands.UserInputError(
+            "Please reply to a message or provide text directly."
+        )
+
+    async def _fetch_conversation_from_reply(
+        self, ctx: commands.Context
+    ) -> Tuple[str, discord.Message]:
+        """Fetches conversation history starting from a replied-to message."""
+        if not ctx.message.reference or not ctx.message.reference.message_id:
+            raise commands.UserInputError(
+                "You must reply to a message to use this command."
+            )
+
+        try:
+            start_message = await ctx.channel.fetch_message(
+                ctx.message.reference.message_id
+            )
+        except (discord.NotFound, discord.Forbidden):
+            raise commands.CommandError("Could not access the starting message.")
+
+        history = [
+            msg async for msg in ctx.channel.history(after=start_message, limit=500)
+        ]
+        messages = [start_message] + history
+
+        convo_text = "\n".join(
+            f"{m.author.display_name}: {m.content}" for m in messages if m.content
+        )
+        if not convo_text:
+            raise commands.CommandError(
+                "There is no text in this conversation to analyze."
+            )
+
+        return convo_text, start_message
+
+    # --- Event Listeners ---
 
     @commands.Cog.listener()
     async def on_ready(self):
-        """Called when the bot successfully connects to Discord."""
-        logging.info(f"Logged in as {self.bot.user}")
-        logging.info("Bot is ready for analysis!")
+        """Called when the bot successfully connects."""
+        logging.info(f"Logged in as {self.bot.user}. Bot is ready.")
         print("-------------------------------------------------")
+
+    @commands.Cog.listener()
+    async def on_command_error(
+        self, ctx: commands.Context, error: commands.CommandError
+    ):
+        """Generic error handler for the cog."""
+        # Silently ignore commands that are not found
+        if isinstance(error, commands.CommandNotFound):
+            return
+        
+        # Handle known user input errors
+        if isinstance(error, (commands.UserInputError, commands.CommandError)):
+            embed = self._create_embed(
+                "Error", config.EMBED_COLORS["error"], description=f"⚠️ {error}"
+            )
+            await ctx.send(embed=embed)
+            return
+
+        # For all other unexpected errors, log the full traceback but send a generic message
+        logging.exception(
+            f"Unexpected error in command '{ctx.command}':", exc_info=error
+        )
+        embed = self._create_embed(
+            "An Unexpected Error Occurred",
+            config.EMBED_COLORS["error"],
+            description="Sorry, something went wrong. The details have been logged for the developer.",
+        )
+        await ctx.send(embed=embed)
+
+    # --- Commands ---
 
     @commands.command(
         name="analyse", aliases=["analyze"], help="Analyses text for logical fallacies."
     )
     async def analyse(self, ctx: commands.Context, *, text: Optional[str] = None):
-        """
-        Analyses text for logical fallacies.
-        Usage: Reply to a message with 'e analyse' or use 'e analyse <your argument>'.
-        """
-        argument_text, author = await self._get_target_text_and_author(ctx, text)
-        if not argument_text:
-            raise commands.UserInputError("Please provide an argument to analyse.")
+        """Analyses text from a reply or argument for logical fallacies."""
+        target_text, author = await self._get_target_from_context(ctx, text)
 
         async with ctx.typing():
-            fallacies = await self.api.get_fallacies(argument_text)
-
-        if fallacies is None:
-            raise commands.CommandError("Failed to get a valid response from the API.")
+            fallacies = await self.api_client.get_fallacies(target_text)
 
         if not fallacies:
-            embed = discord.Embed(
-                title="Analysis Complete",
-                description="✅ No logical fallacies were detected.",
-                color=EMBED_COLOR_SUCCESS,
+            embed = self._create_embed(
+                "Analysis Complete",
+                config.EMBED_COLORS["success"],
+                "✅ No logical fallacies were detected.",
             )
             await ctx.send(embed=embed)
             return
 
-        embed = discord.Embed(
-            title="Logical Fallacy Analysis",
-            description=f"Found {len(fallacies)} potential fallac{'y' if len(fallacies) == 1 else 'ies'}:",
-            color=EMBED_COLOR_ANALYSE,
+        embed = self._create_embed(
+            "Logical Fallacy Analysis",
+            config.EMBED_COLORS["analyse"],
+            f"Found {len(fallacies)} potential fallac{'y' if len(fallacies) == 1 else 'ies'}:",
+            footer=f"Analysed for {author.display_name}",
         )
-        embed.set_footer(text=f"Analysed for {author.display_name}")
-
         for i, fallacy in enumerate(fallacies, 1):
-            field_value = (
-                f"**Explanation:** {fallacy.get('explanation', 'N/A')}\n"
-                f'**Quote:** *"{fallacy.get("quote", "N/A")}"*'
-            )
+            val = f'**Explanation:** {fallacy.get("explanation", "N/A")}\n**Quote:** *"{fallacy.get("quote", "N/A")}"*'
             embed.add_field(
                 name=f"{i}. {fallacy.get('fallacy_name', 'Unknown')}",
-                value=self.truncate_text(field_value, 1024),
+                value=self._truncate(val, 1024),
                 inline=False,
             )
 
@@ -286,100 +313,57 @@ class AnalysisCog(commands.Cog):
         name="grammar", help="Checks text for grammar and spelling errors."
     )
     async def grammar(self, ctx: commands.Context, *, text: Optional[str] = None):
-        """
-        Checks text for grammar and spelling errors.
-        Usage: Reply to a message with 'e grammar' or use 'e grammar <your text>'.
-        """
-        text_to_check, author = await self._get_target_text_and_author(ctx, text)
-        if not text_to_check:
-            raise commands.UserInputError("Please provide text to check.")
+        """Checks text from a reply or argument for grammatical errors."""
+        target_text, author = await self._get_target_from_context(ctx, text)
 
         async with ctx.typing():
-            errors = await self.api.get_grammar_errors(text_to_check)
-
-        if errors is None:
-            raise commands.CommandError("Failed to get a valid response from the API.")
+            errors = await self.api_client.get_grammar_errors(target_text)
 
         if not errors:
-            embed = discord.Embed(
-                title="Grammar Check Complete",
-                description="✅ No grammatical errors were detected.",
-                color=EMBED_COLOR_SUCCESS,
+            embed = self._create_embed(
+                "Grammar Check Complete",
+                config.EMBED_COLORS["success"],
+                "✅ No grammatical errors were detected.",
             )
             await ctx.send(embed=embed)
             return
 
-        embed = discord.Embed(
-            title="Grammar Analysis",
-            description=f"Found {len(errors)} potential error{'s' if len(errors) > 1 else ''}:",
-            color=EMBED_COLOR_GRAMMAR,
+        embed = self._create_embed(
+            "Grammar Analysis",
+            config.EMBED_COLORS["grammar"],
+            f"Found {len(errors)} potential error{'s' if len(errors) > 1 else ''}:",
+            footer=f"Checked for {author.display_name}",
         )
-        embed.set_footer(text=f"Checked for {author.display_name}")
-
         for i, error in enumerate(errors, 1):
-            field_value = (
-                f"**Explanation:** {error.get('explanation', 'N/A')}\n"
-                f"**Correction:** `{error.get('correction', 'N/A')}`\n"
-                f'**Original:** *"{error.get("quote", "N/A")}"*'
-            )
+            val = f'**Explanation:** {error.get("explanation", "N/A")}\n**Correction:** `{error.get("correction", "N/A")}`\n**Original:** *"{error.get("quote", "N/A")}"*'
             embed.add_field(
-                name=f"{i}. {error.get('error_type', 'Unknown Error')}",
-                value=self.truncate_text(field_value, 1024),
+                name=f"{i}. {error.get('error_type', 'Unknown')}",
+                value=self._truncate(val, 1024),
                 inline=False,
             )
 
         await ctx.reply(embed=embed, mention_author=False)
 
     @commands.command(
-        name="tldr", help="Summarises a conversation from a replied-to message."
+        name="tldr",
+        aliases=["summarise", "summarize"],
+        help="Summarises a conversation.",
     )
     async def tldr(self, ctx: commands.Context):
-        """
-        Summarises a conversation.
-        Usage: Reply to the starting message of a conversation with 'e tldr'.
-        """
-        if not ctx.message.reference or not ctx.message.reference.message_id:
-            raise commands.UserInputError(
-                "You must reply to the starting message to summarize a conversation."
-            )
-
-        try:
-            start_message = await ctx.channel.fetch_message(
-                ctx.message.reference.message_id
-            )
-        except (discord.NotFound, discord.Forbidden):
-            raise commands.CommandError(
-                "Could not find or access the starting message."
-            )
+        """Summarises a conversation starting from the replied-to message."""
+        convo_text, start_message = await self._fetch_conversation_from_reply(ctx)
 
         async with ctx.typing():
-            history = [
-                msg async for msg in ctx.channel.history(after=start_message, limit=500)
-            ]
-            messages_to_summarize = [start_message] + history
-
-            conversation_text = "\n".join(
-                f"{msg.author.display_name}: {msg.content}"
-                for msg in messages_to_summarize
-                if msg.content
-            )
-
-            if not conversation_text:
-                await ctx.send("There's nothing to summarize!")
-                return
-
-            summary = await self.api.get_summary(conversation_text)
+            summary = await self.api_client.get_summary(convo_text)
 
         if not summary:
             raise commands.CommandError("Failed to generate a summary.")
 
-        embed = discord.Embed(
-            title="Conversation Summary (TL;DR)",
-            description=self.truncate_text(summary, 4096),
-            color=EMBED_COLOR_SUMMARY,
-        )
-        embed.set_footer(
-            text=f"Summary of conversation since {start_message.author.display_name}'s message."
+        embed = self._create_embed(
+            "Conversation Summary (TL;DR)",
+            config.EMBED_COLORS["summary"],
+            description=self._truncate(summary, 4096),
+            footer=f"Summary of conversation since {start_message.author.display_name}'s message.",
         )
         await ctx.reply(embed=embed, mention_author=False)
 
@@ -387,97 +371,46 @@ class AnalysisCog(commands.Cog):
         name="solution", help="Gives a neutral solution on a conversation."
     )
     async def solution(self, ctx: commands.Context):
-        """
-        Gives a solution on a conversation.
-        Usage: Reply to the starting message of a conversation with 'e solution'.
-        """
-        if not ctx.message.reference or not ctx.message.reference.message_id:
-            raise commands.UserInputError(
-                "You must reply to the starting message to get an solution on a conversation."
-            )
-
-        try:
-            start_message = await ctx.channel.fetch_message(
-                ctx.message.reference.message_id
-            )
-        except (discord.NotFound, discord.Forbidden):
-            raise commands.CommandError(
-                "Could not find or access the starting message."
-            )
+        """Provides a neutral solution for a conversation starting from the replied-to message."""
+        convo_text, start_message = await self._fetch_conversation_from_reply(ctx)
 
         async with ctx.typing():
-            # Fetch up to 100 messages after the replied-to message for context
-            history = [
-                msg async for msg in ctx.channel.history(after=start_message, limit=500)
-            ]
-            # Combine the starting message with the rest of the history
-            messages_to_analyse = [start_message] + history
-
-            conversation_text = "\n".join(
-                f"{msg.author.display_name}: {msg.content}"
-                for msg in messages_to_analyse
-                if msg.content
-            )
-
-            if not conversation_text:
-                await ctx.send("There's nothing to give an solution on!")
-                return
-
-            solution_text = await self.api.get_solution(conversation_text)
+            solution_text = await self.api_client.get_solution(convo_text)
 
         if not solution_text:
-            raise commands.CommandError("Failed to generate an solution.")
+            raise commands.CommandError("Failed to generate a solution.")
 
-        embed = discord.Embed(
-            title="A Solution",
-            description=self.truncate_text(solution_text, 4096),
-            color=EMBED_COLOR_SOLUTION,
-        )
-        embed.set_footer(
-            text=f"Solution on the conversation since {start_message.author.display_name}'s message."
+        embed = self._create_embed(
+            "A Potential Solution",
+            config.EMBED_COLORS["solution"],
+            description=self._truncate(solution_text, 4096),
+            footer=f"Solution for conversation since {start_message.author.display_name}'s message.",
         )
         await ctx.reply(embed=embed, mention_author=False)
-
-    @commands.Cog.listener()
-    async def on_command_error(
-        self, ctx: commands.Context, error: commands.CommandError
-    ):
-        """Generic error handler for the cog."""
-        if isinstance(error, (commands.UserInputError, commands.CommandError)):
-            # Send user-facing errors directly to the channel
-            embed = discord.Embed(
-                title="Error", description=f"⚠️ {error}", color=EMBED_COLOR_ERROR
-            )
-            await ctx.send(embed=embed)
-        elif isinstance(error, commands.CommandNotFound):
-            # Optionally, uncomment the next line to ignore 'command not found' errors silently
-            # return
-            pass
-        else:
-            # For unexpected errors, log them and notify the user
-            logging.exception(
-                f"An unexpected error occurred in command '{ctx.command}':",
-                exc_info=error,
-            )
-            embed = discord.Embed(
-                title="An Unexpected Error Occurred",
-                description="Sorry, something went wrong. This has been logged for the developer.",
-                color=EMBED_COLOR_ERROR,
-            )
-            await ctx.send(embed=embed)
 
 
 # --- Main Execution ---
 
 
 async def main():
-    """Main function to run the bot."""
-    async with bot:
-        await bot.add_cog(AnalysisCog(bot))
-        await bot.start(DISCORD_TOKEN)
+    """Sets up the bot and runs it."""
+    intents = discord.Intents.default()
+    intents.messages = True
+    intents.message_content = True
+
+    bot = commands.Bot(command_prefix=config.PREFIX, intents=intents)
+
+    # Pass the full URL from the config to the API client
+    api_client = GeminiAPIClient(config.GEMINI_API_URL)
+
+    # Add cogs and other setup here
+    await bot.add_cog(AnalysisCog(bot, api_client))
+
+    try:
+        await bot.start(config.DISCORD_TOKEN)
+    finally:
+        await api_client.close()
 
 
 if __name__ == "__main__":
-    import asyncio
-
     asyncio.run(main())
