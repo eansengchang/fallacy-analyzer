@@ -29,6 +29,7 @@ class Config:
 
     # Bot Settings
     PREFIX = ["e ", "E "]
+    SNIPE_CACHE_LIMIT = 10  # Max deleted messages to store per channel
 
     # API Settings
     GEMINI_API_URL: str = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
@@ -42,6 +43,7 @@ class Config:
             "grammar": discord.Color.blue(),
             "summary": discord.Color.purple(),
             "solution": discord.Color.teal(),
+            "snipe": discord.Color.light_grey(),  # Added for snipe command
         }
     )
 
@@ -171,6 +173,8 @@ class AnalysisCog(commands.Cog):
     def __init__(self, bot: commands.Bot, api_client: GeminiAPIClient):
         self.bot = bot
         self.api_client = api_client
+        # In-memory cache for deleted messages, keyed by channel ID
+        self.sniped_messages: Dict[int, List[discord.Message]] = {}
 
     # --- Helper Methods ---
 
@@ -245,6 +249,26 @@ class AnalysisCog(commands.Cog):
         print("-------------------------------------------------")
 
     @commands.Cog.listener()
+    async def on_message_delete(self, message: discord.Message):
+        """Caches a deleted message for the snipe command."""
+        # Ignore messages from bots and those without content/attachments
+        if message.author.bot or (not message.content and not message.attachments):
+            return
+
+        channel_id = message.channel.id
+        # Initialize the list for the channel if it doesn't exist
+        if channel_id not in self.sniped_messages:
+            self.sniped_messages[channel_id] = []
+
+        # Add the message to the front of the list
+        self.sniped_messages[channel_id].insert(0, message)
+
+        # Trim the list to the configured limit
+        self.sniped_messages[channel_id] = self.sniped_messages[channel_id][
+            : config.SNIPE_CACHE_LIMIT
+        ]
+
+    @commands.Cog.listener()
     async def on_command_error(
         self, ctx: commands.Context, error: commands.CommandError
     ):
@@ -252,7 +276,7 @@ class AnalysisCog(commands.Cog):
         # Silently ignore commands that are not found
         if isinstance(error, commands.CommandNotFound):
             return
-        
+
         # Handle known user input errors
         if isinstance(error, (commands.UserInputError, commands.CommandError)):
             embed = self._create_embed(
@@ -388,6 +412,51 @@ class AnalysisCog(commands.Cog):
         )
         await ctx.reply(embed=embed, mention_author=False)
 
+    @commands.command(name="snipe", help="Displays the last message that was deleted.")
+    async def snipe(self, ctx: commands.Context, index: int = 1):
+        """Shows the last deleted message in the channel."""
+        channel_id = ctx.channel.id
+
+        # Check if there are any messages sniped in this channel
+        if (
+            channel_id not in self.sniped_messages
+            or not self.sniped_messages[channel_id]
+        ):
+            raise commands.CommandError(
+                "There are no messages to snipe in this channel."
+            )
+
+        # Validate the index
+        if index <= 0:
+            raise commands.UserInputError(
+                "Index must be a positive number (1, 2, etc.)."
+            )
+
+        sniped_list = self.sniped_messages[channel_id]
+        if index > len(sniped_list):
+            raise commands.CommandError(
+                f"There are only {len(sniped_list)} deleted messages stored. Cannot snipe message #{index}."
+            )
+
+        # Get the message from our cache (index-1 because user input is 1-based)
+        msg = sniped_list[index - 1]
+
+        # Create the embed
+        embed = self._create_embed(
+            "Sniped Message",
+            config.EMBED_COLORS["snipe"],
+            description=msg.content or "_(No text content)_",
+            footer=f"Sniping message {index}/{len(sniped_list)}.",
+        )
+        embed.set_author(name=str(msg.author), icon_url=msg.author.display_avatar.url)
+        embed.timestamp = msg.created_at  # Show when the original message was sent
+
+        # If there was an image/attachment, display it
+        if msg.attachments and msg.attachments[0].url:
+            embed.set_image(url=msg.attachments[0].url)
+
+        await ctx.send(embed=embed)
+
 
 # --- Main Execution ---
 
@@ -397,6 +466,7 @@ async def main():
     intents = discord.Intents.default()
     intents.messages = True
     intents.message_content = True
+    intents.guilds = True  # Needed for on_message_delete to work reliably
 
     bot = commands.Bot(command_prefix=config.PREFIX, intents=intents)
 
