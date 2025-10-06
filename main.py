@@ -29,7 +29,7 @@ class Config:
 
     # Bot Settings
     PREFIX = ["e ", "E "]
-    SNIPE_CACHE_LIMIT = 10  # Max deleted messages to store per channel
+    SNIPE_CACHE_LIMIT = 10  # Max deleted/edited messages to store per channel
 
     # API Settings
     GEMINI_API_URL: str = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_KEY}"
@@ -43,7 +43,8 @@ class Config:
             "grammar": discord.Color.blue(),
             "summary": discord.Color.purple(),
             "solution": discord.Color.teal(),
-            "snipe": discord.Color.light_grey(),  # Added for snipe command
+            "snipe": discord.Color.light_grey(),
+            "editsnipe": discord.Color.gold(),  # Added for editsnipe command
         }
     )
 
@@ -173,8 +174,11 @@ class AnalysisCog(commands.Cog):
     def __init__(self, bot: commands.Bot, api_client: GeminiAPIClient):
         self.bot = bot
         self.api_client = api_client
-        # In-memory cache for deleted messages, keyed by channel ID
+        # In-memory caches for deleted and edited messages
         self.sniped_messages: Dict[int, List[discord.Message]] = {}
+        self.edited_messages: Dict[
+            int, List[Tuple[discord.Message, discord.Message]]
+        ] = {}
 
     # --- Helper Methods ---
 
@@ -265,6 +269,26 @@ class AnalysisCog(commands.Cog):
 
         # Trim the list to the configured limit
         self.sniped_messages[channel_id] = self.sniped_messages[channel_id][
+            : config.SNIPE_CACHE_LIMIT
+        ]
+
+    @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        """Caches an edited message for the editsnipe command."""
+        # Ignore edits from bots, or if the content is the same (e.g., embed added)
+        if before.author.bot or before.content == after.content:
+            return
+
+        channel_id = before.channel.id
+        # Initialize the list for the channel if it doesn't exist
+        if channel_id not in self.edited_messages:
+            self.edited_messages[channel_id] = []
+
+        # Add the message tuple (before, after) to the front of the list
+        self.edited_messages[channel_id].insert(0, (before, after))
+
+        # Trim the list to the configured limit
+        self.edited_messages[channel_id] = self.edited_messages[channel_id][
             : config.SNIPE_CACHE_LIMIT
         ]
 
@@ -457,6 +481,63 @@ class AnalysisCog(commands.Cog):
 
         await ctx.send(embed=embed)
 
+    @commands.command(
+        name="editsnipe", help="Displays the last message that was edited."
+    )
+    async def editsnipe(self, ctx: commands.Context, index: int = 1):
+        """Shows the last edited message in the channel."""
+        channel_id = ctx.channel.id
+
+        # Check if there are any messages to snipe
+        if (
+            channel_id not in self.edited_messages
+            or not self.edited_messages[channel_id]
+        ):
+            raise commands.CommandError(
+                "There are no recently edited messages to snipe in this channel."
+            )
+
+        # Validate the index
+        if index <= 0:
+            raise commands.UserInputError(
+                "Index must be a positive number (1, 2, etc.)."
+            )
+
+        edited_list = self.edited_messages[channel_id]
+        if index > len(edited_list):
+            raise commands.CommandError(
+                f"There are only {len(edited_list)} edited messages stored. Cannot snipe edit #{index}."
+            )
+
+        # Get the message tuple from our cache
+        before_msg, after_msg = edited_list[index - 1]
+
+        # Create the embed
+        embed = self._create_embed(
+            "Edited Message",
+            config.EMBED_COLORS["editsnipe"],
+            description=f"[Jump to Message]({after_msg.jump_url})",
+            footer=f"Sniping edit {index}/{len(edited_list)}.",
+        )
+        embed.set_author(
+            name=str(after_msg.author), icon_url=after_msg.author.display_avatar.url
+        )
+        embed.timestamp = after_msg.edited_at  # Show when the message was edited
+
+        # Add fields for before and after content
+        embed.add_field(
+            name="Before",
+            value=self._truncate(before_msg.content or "_(No text)_", 1024),
+            inline=False,
+        )
+        embed.add_field(
+            name="After",
+            value=self._truncate(after_msg.content or "_(No text)_", 1024),
+            inline=False,
+        )
+
+        await ctx.send(embed=embed)
+
 
 # --- Main Execution ---
 
@@ -466,7 +547,7 @@ async def main():
     intents = discord.Intents.default()
     intents.messages = True
     intents.message_content = True
-    intents.guilds = True  # Needed for on_message_delete to work reliably
+    intents.guilds = True  # Needed for on_message events to work reliably
 
     bot = commands.Bot(command_prefix=config.PREFIX, intents=intents)
 
