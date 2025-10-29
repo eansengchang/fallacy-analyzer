@@ -537,7 +537,24 @@ class AnalysisCog(commands.Cog):
         )
 
         await ctx.send(embed=embed)
-
+        
+    # funny feature where bot responds to 67 with a gif
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.author == self.bot.user:
+            return
+        
+        # only on server 512578878305337354
+        if message.guild and message.guild.id != 512578878305337354:
+            return
+        
+        # check if message contains 6 then 7 in close succession
+        if '6' in message.content and '7' in message.content:
+            index_6 = message.content.index('6')
+            index_7 = message.content.index('7')
+            if abs(index_6 - index_7) <= 15 and index_6 < index_7:
+                await message.reply("https://tenor.com/view/67-gif-8575841764206736991")
+        
 
 # --- Main Execution ---
 
